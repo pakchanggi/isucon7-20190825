@@ -660,7 +660,7 @@ func postProfile(c echo.Context) error {
 		avatarName = fmt.Sprintf("%x%s", sha1.Sum(avatarData), ext)
 
 		if avatarName != "" && len(avatarData) > 0 {
-			createFile , err := os.OpenFile("/home/isucon/isubata/webapp/public/icons" + avatarName,os.O_WRONLY|os.O_CREATE, 0666)
+			createFile , err := os.OpenFile("/home/isucon/isubata/webapp/public/icons/" + avatarName,os.O_WRONLY|os.O_CREATE, 0666)
 			io.Copy(createFile,file)
 			_, err = db.Exec("UPDATE user SET avatar_icon = ? WHERE id = ?", avatarName, self.ID)
 			if err != nil {

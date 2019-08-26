@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	crand "crypto/rand"
 	"crypto/sha1"
 	"database/sql"
@@ -13,6 +14,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -366,6 +368,51 @@ func jsonifyMessage(m Message) (map[string]interface{}, error) {
 	return r, nil
 }
 
+func jsonifyAllMessage(ms []Message) ([]map[string]interface{}, error) {
+	inQuery := ""
+	for _,m := range ms {
+		inQuery = inQuery + strconv.Itoa(int(m.UserID))
+		inQuery = inQuery + ","
+	}
+	inQuery = inQuery + "0"
+	rows,err := db.Query("SELECT id,name, display_name, avatar_icon FROM user WHERE id in (" + inQuery + ")")
+	if err != nil {
+		return nil, err
+	}
+	userMap := make(map[int64]User)
+	for rows.Next() {
+		u := User{}
+		var id int64
+		var name string
+		var display_name string
+		var avatar_icon string
+		rows.Scan(&id, &name, &display_name, &avatar_icon)
+		u.Name = name
+		u.DisplayName = display_name
+		u.AvatarIcon = avatar_icon
+		userMap[id] = u
+	}
+	res := make([]map[string]interface{},0)
+	for _,m := range ms {
+		r := make(map[string]interface{})
+		r["id"] = m.ID
+		r["user"] = userMap[m.UserID]
+		r["date"] = m.CreatedAt.Format("2006/01/02 15:04:05")
+		r["content"] = m.Content
+		res = append(res, r)
+	}
+	sort.SliceStable(res,func(i, j int) bool {
+		if x, ok := res[i]["id"].(int64); ok{
+			if y, ok := res[j]["id"].(int64); ok{
+				return x < y
+			}
+		}
+		return true
+	})
+
+	return res, nil
+}
+
 func getMessage(c echo.Context) error {
 	userID := sessUserID(c)
 	if userID == 0 {
@@ -387,12 +434,11 @@ func getMessage(c echo.Context) error {
 	}
 
 	response := make([]map[string]interface{}, 0)
-	for i := len(messages) - 1; i >= 0; i-- {
-		m := messages[i]
-		r, err := jsonifyMessage(m)
-		if err != nil {
-			return err
-		}
+	res,err:= jsonifyAllMessage(messages)
+	if err != nil {
+		return err
+	}
+	for _,r := range res {
 		response = append(response, r)
 	}
 
@@ -436,6 +482,35 @@ func queryHaveRead(userID, chID int64) (int64, error) {
 	return h.MessageID, nil
 }
 
+func queryAllHaveRead(userID int64, chIDs []int64) (map[int64]int64, error) {
+	type HaveRead struct {
+		UserID    int64     `db:"user_id"`
+		ChannelID int64     `db:"channel_id"`
+		MessageID int64     `db:"message_id"`
+		UpdatedAt time.Time `db:"updated_at"`
+		CreatedAt time.Time `db:"created_at"`
+	}
+	h := []HaveRead{}
+	inQuery := ""
+	for _,chID := range chIDs {
+		inQuery = inQuery + strconv.Itoa(int(chID))
+		inQuery = inQuery + ","
+	}
+	inQuery = inQuery + "0"
+	err := db.Select(&h, "SELECT * FROM haveread WHERE user_id = ? AND channel_id in (" + inQuery + ")",
+		userID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	messages := make(map[int64]int64)
+	for _,e := range h {
+		messages[e.ChannelID] = e.MessageID
+	}
+	return messages, nil
+}
+
 func fetchUnread(c echo.Context) error {
 	userID := sessUserID(c)
 	if userID == 0 {
@@ -450,22 +525,27 @@ func fetchUnread(c echo.Context) error {
 	}
 
 	resp := []map[string]interface{}{}
-
-	for _, chID := range channels {
-		lastID, err := queryHaveRead(userID, chID)
-		if err != nil {
-			return err
-		}
-
+	lastIDMap, err := queryAllHaveRead(userID, channels)
+	cntMap := make(map[int64]int64)
+	rows, err := db.Query("SELECT channel_id,count(*) as cnt FROM message group by channel_id")
+	for rows.Next(){
+		var channelId int64
 		var cnt int64
-		if lastID > 0 {
-			err = db.Get(&cnt,
-				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
-				chID, lastID)
+		rows.Scan(&channelId,&cnt)
+		cntMap[channelId] = cnt
+	}
+	for _,chID := range channels {
+		var cnt int64
+		if lastIDMap != nil {
+			if val, ok := lastIDMap[chID]; ok {
+				err = db.Get(&cnt,
+					"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
+					chID, val)
+			}else {
+				cnt = cntMap[chID]
+			}
 		} else {
-			err = db.Get(&cnt,
-				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?",
-				chID)
+			cnt = cntMap[chID]
 		}
 		if err != nil {
 			return err
@@ -475,7 +555,6 @@ func fetchUnread(c echo.Context) error {
 			"unread":     cnt}
 		resp = append(resp, r)
 	}
-
 	return c.JSON(http.StatusOK, resp)
 }
 
@@ -661,7 +740,7 @@ func postProfile(c echo.Context) error {
 
 		if avatarName != "" && len(avatarData) > 0 {
 			createFile , err := os.OpenFile("/home/isucon/isubata/webapp/public/icons/" + avatarName,os.O_WRONLY|os.O_CREATE, 0666)
-			io.Copy(createFile,file)
+			io.Copy(createFile,bytes.NewReader(avatarData))
 			_, err = db.Exec("UPDATE user SET avatar_icon = ? WHERE id = ?", avatarName, self.ID)
 			if err != nil {
 				return err

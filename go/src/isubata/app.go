@@ -25,7 +25,24 @@ import (
 	"github.com/labstack/echo"
 	"github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/middleware"
+	"github.com/gomodule/redigo/redis"
 )
+
+var pool = newPool()
+
+func newPool() *redis.Pool {
+	return &redis.Pool{
+		MaxIdle:   80,
+		MaxActive: 12000, // max number of connections
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial("tcp", ":6379")
+			if err != nil {
+				panic(err.Error())
+			}
+			return c, err
+		},
+	}
+}
 
 const (
 	avatarMaxBytes = 1 * 1024 * 1024
@@ -134,19 +151,14 @@ func queryMessages(chanID, lastID int64) ([]Message, error) {
 func sessUserID(c echo.Context) int64 {
 	sess, _ := session.Get("session", c)
 	var userID int64
-	if x, ok := sess.Values["user_id"]; ok {
-		userID, _ = x.(int64)
-	}
+	userID,_ = redis.Int64(pool.Get().Do("GET", sess.ID))
+	fmt.Println(userID)
 	return userID
 }
 
 func sessSetUserID(c echo.Context, id int64) {
 	sess, _ := session.Get("session", c)
-	sess.Options = &sessions.Options{
-		HttpOnly: true,
-		MaxAge:   360000,
-	}
-	sess.Values["user_id"] = id
+	pool.Get().Do("SET", sess.ID, id)
 	sess.Save(c.Request(), c.Response())
 }
 
@@ -165,7 +177,7 @@ func ensureLogin(c echo.Context) (*User, error) {
 	}
 	if user == nil {
 		sess, _ := session.Get("session", c)
-		delete(sess.Values, "user_id")
+		pool.Get().Do("DEL", sess.ID)
 		sess.Save(c.Request(), c.Response())
 		goto redirect
 	}
@@ -322,7 +334,7 @@ func postLogin(c echo.Context) error {
 
 func getLogout(c echo.Context) error {
 	sess, _ := session.Get("session", c)
-	delete(sess.Values, "user_id")
+	pool.Get().Do("DEL", sess.ID)
 	sess.Save(c.Request(), c.Response())
 	return c.Redirect(http.StatusSeeOther, "/")
 }
